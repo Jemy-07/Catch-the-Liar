@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Catch the Liar</title>
+<style>
+:root{--bg:#e8edf1;--ink:#1b2433;--muted:#5b6678;--card:#fff;--line:#c9d2dc;--mark:#ffe066;--bad:#c92a4b;--good:#1f7a5a;--btn:#1b2433;--btntext:#fff}
+@media (prefers-color-scheme:dark){:root{--bg:#121923;--ink:#e6ebf2;--muted:#9aa6b8;--card:#1b2433;--line:#2f3b50;--mark:#6b5b12;--bad:#ff6b88;--good:#4cc79a;--btn:#e6ebf2;--btntext:#121923}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,sans-serif}
+main{max-width:720px;margin:0 auto;padding:32px 20px 64px}
+h1{font:700 2.2rem/1.1 Georgia,serif;margin:0 0 6px}
+.sub{color:var(--muted);margin:0 0 24px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:18px;margin-bottom:16px}
+label{display:block;font-weight:600;margin:0 0 6px}
+textarea,input,select{width:100%;font:inherit;color:inherit;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:10px}
+textarea{min-height:140px;resize:vertical}
+.row{display:flex;gap:12px;flex-wrap:wrap;margin-top:12px}
+.row>div{flex:1;min-width:150px}
+button{font:inherit;cursor:pointer}
+.go{background:var(--btn);color:var(--btntext);border:0;border-radius:6px;padding:11px 20px;font-weight:600}
+.go:disabled{opacity:.5;cursor:wait}
+:focus-visible{outline:3px solid var(--mark);outline-offset:2px}
+#passage{font:1.15rem/1.8 Georgia,serif}
+.s{display:block;width:100%;text-align:left;background:none;border:1px solid transparent;border-radius:6px;padding:6px 8px;color:inherit;font:inherit}
+.s:hover:not(:disabled){background:var(--mark)}
+.s:disabled{cursor:default}
+.s.lie{border-color:var(--bad);background:color-mix(in srgb,var(--bad) 14%,transparent)}
+.s.wrong{text-decoration:line-through;color:var(--muted)}
+#result{margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}
+.ok{color:var(--good);font-weight:700}.no{color:var(--bad);font-weight:700}
+#status{color:var(--muted);min-height:1.5em}
+details{margin-bottom:16px}summary{cursor:pointer;color:var(--muted)}
+.hide{display:none}
+</style>
+</head>
+<body>
+<main>
+  <h1>Catch the Liar</h1>
+  <p class="sub">Paste your notes. The AI explains them, but one sentence is a lie. Find it.</p>
+
+  <details>
+    <summary>Model settings</summary>
+    <div class="card">
+      <div class="row">
+        <div><label for="base">API base URL</label><input id="base" value="https://api.groq.com/openai/v1"></div>
+        <div><label for="model">Model</label><input id="model" value="llama-3.3-70b-versatile"></div>
+      </div>
+      <div class="row"><div><label for="key">API key (kept in memory only)</label><input id="key" type="password" autocomplete="off"></div></div>
+      <div class="row">
+        <div style="flex:0 0 auto"><button class="go" id="list" type="button">Find models I can use</button></div>
+        <div><select id="models" class="hide" aria-label="Available models"></select></div>
+      </div>
+    </div>
+  </details>
+
+  <div class="card">
+    <label for="notes">Your notes</label>
+    <textarea id="notes" placeholder="Paste a few paragraphs from your lecture notes or textbook."></textarea>
+    <div class="row">
+      <div><label for="diff">Difficulty</label>
+        <select id="diff"><option>easy</option><option selected>medium</option><option>hard</option></select></div>
+      <div style="align-self:flex-end"><button class="go" id="start">Make a passage</button></div>
+    </div>
+    <p id="status" role="status"></p>
+  </div>
+
+  <div class="card hide" id="game">
+    <div id="passage"></div>
+    <div id="result" class="hide"></div>
+    <div class="row"><button class="go hide" id="next">Next round</button></div>
+  </div>
+
+  <div class="card hide" id="stats"></div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const score = { right: 0, total: 0 }, missed = {};
+let round = null;
+
+async function ask(prompt) {
+  const res = await fetch($("base").value.replace(/\/$/, "") + "/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: "Bearer " + $("key").value },
+    body: JSON.stringify({
+      model: $("model").value,
+      temperature: 0.7,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: "You reply with one valid JSON object and nothing else." },
+        { role: "user", content: prompt }
+      ]
+    })
+  });
+  if (!res.ok) {
+    let detail = "";
+    try { detail = (await res.json()).error.message; } catch (e) {}
+    throw new Error("API error " + res.status + ": " + detail + " (URL: " + res.url + ")");
+  }
+  const data = await res.json();
+  const text = data.choices[0].message.content.replace(/```json|```/g, "").trim();
+  return JSON.parse(text);
+}
+
+const makePrompt = (notes, diff) => `Write a passage of 6 to 8 sentences explaining the key ideas in the notes below, in a confident textbook tone.
+Insert exactly ONE factual error into exactly one sentence. Every other sentence must be true according to the notes.
+Difficulty "${diff}": easy = an obviously wrong number or name; medium = a believable wrong date or cause; hard = a subtle reversal or mix-up that sounds natural.
+Return JSON: {"sentences":[strings],"lie_index":0-based integer,"correction":"the true version of the false sentence","why":"one sentence on why the lie is wrong","type":"date|number|name|cause_effect|definition"}
+
+Notes:
+${notes}`;
+
+const verifyPrompt = (notes, r) => `Notes:
+${notes}
+
+Passage sentences:
+${r.sentences.map((s, i) => i + ": " + s).join("\n")}
+
+Claim: only sentence ${r.lie_index} is false, and its true version is: "${r.correction}".
+Check this against the notes. Return JSON: {"lie_is_false":true/false,"other_sentences_false":true/false}`;
+
+async function buildRound(notes, diff) {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    $("status").textContent = "Writing a passage (try " + attempt + ")...";
+    const r = await ask(makePrompt(notes, diff));
+    if (!Array.isArray(r.sentences) || !r.sentences[r.lie_index]) continue;
+    $("status").textContent = "Checking that the lie is really a lie...";
+    const v = await ask(verifyPrompt(notes, r));
+    if (v.lie_is_false && !v.other_sentences_false) return r;
+  }
+  throw new Error("Couldn't get a reliable passage. Try longer notes or another round.");
+}
+
+function show(r) {
+  round = r;
+  $("game").classList.remove("hide");
+  $("result").classList.add("hide");
+  $("next").classList.add("hide");
+  const box = $("passage");
+  box.replaceChildren();
+  r.sentences.forEach((text, i) => {
+    const b = document.createElement("button");
+    b.className = "s";
+    b.textContent = text;
+    b.onclick = () => guess(i);
+    box.appendChild(b);
+  });
+}
+
+function guess(i) {
+  const buttons = [...document.querySelectorAll(".s")];
+  buttons.forEach(b => b.disabled = true);
+  const hit = i === round.lie_index;
+  score.total++;
+  if (hit) score.right++; else { missed[round.type] = (missed[round.type] || 0) + 1; buttons[i].classList.add("wrong"); }
+  buttons[round.lie_index].classList.add("lie");
+  const res = $("result");
+  res.replaceChildren();
+  const head = document.createElement("p");
+  head.className = hit ? "ok" : "no";
+  head.textContent = hit ? "Caught it." : "Not that one.";
+  const why = document.createElement("p");
+  why.textContent = round.why + " Correct version: " + round.correction;
+  res.append(head, why);
+  res.classList.remove("hide");
+  $("next").classList.remove("hide");
+  renderStats();
+}
+
+function renderStats() {
+  const s = $("stats");
+  s.classList.remove("hide");
+  const worst = Object.entries(missed).sort((a, b) => b[1] - a[1])[0];
+  s.textContent = "Score: " + score.right + " / " + score.total +
+    (worst ? ". You miss " + worst[0].replace("_", " ") + " errors most." : ".");
+}
+
+async function play() {
+  const notes = $("notes").value.trim();
+  if (notes.length < 200) { $("status").textContent = "Paste a little more: at least a few sentences of notes."; return; }
+  if (!$("key").value) { $("status").textContent = "Add your API key under Model settings."; return; }
+  $("start").disabled = true;
+  try { show(await buildRound(notes, $("diff").value)); $("status").textContent = ""; }
+  catch (e) { $("status").textContent = e.message; }
+  $("start").disabled = false;
+}
+$("list").onclick = async () => {
+  $("status").textContent = "Asking the API which models you can use...";
+  try {
+    const res = await fetch($("base").value.replace(/\/$/, "") + "/models", { headers: { Authorization: "Bearer " + $("key").value } });
+    if (!res.ok) throw new Error("API error " + res.status + " while listing models. Check your key.");
+    const ids = (await res.json()).data.map(m => m.id)
+      .filter(id => !/whisper|tts|guard|embed|orpheus|playai/i.test(id)).sort();
+    const sel = $("models");
+    sel.replaceChildren(...ids.map(id => new Option(id, id)));
+    sel.classList.remove("hide");
+    const pick = ids.find(id => /llama/i.test(id)) || ids[0];
+    sel.value = pick; $("model").value = pick;
+    sel.onchange = () => { $("model").value = sel.value; };
+    $("status").textContent = "Found " + ids.length + " models. Selected: " + pick;
+  } catch (e) { $("status").textContent = e.message; }
+};
+$("start").onclick = play;
+$("next").onclick = play;
+</script>
+</body>
+</html>
